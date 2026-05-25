@@ -1,0 +1,18 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "PIdisk",
+  "outputfilename": "PIdisk",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "PIdisk Team"
+  },
+  "info": {
+    "productName": "PIdisk",
+    "productVersion": "0.1.0",
+    "copyright": "MIT 2026 PIdisk contributors",
+    "comments": "Cross-platform SFTP file manager with two-way sync"
+  }
+}

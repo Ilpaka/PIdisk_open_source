@@ -1,0 +1,11 @@
+{
+  "name": "pidisk",
+  "version": "1.0.0",
+  "description": "PIdisk - Современный файловый менеджер с SSH-синхронизацией",
+  "private": true,
+  "scripts": {
+    "dev": "npx @tauri-apps/cli dev",
+    "build": "npx @tauri-apps/cli build",
+    "tauri": "npx @tauri-apps/cli"
+  }
+}

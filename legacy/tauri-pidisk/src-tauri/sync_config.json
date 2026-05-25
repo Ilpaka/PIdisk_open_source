@@ -1,0 +1,6 @@
+{
+  "local_sync_folder": "",
+  "remote_sync_folder": "/root/PIdisk/sync",
+  "sync_interval_seconds": 30,
+  "enabled": true
+}

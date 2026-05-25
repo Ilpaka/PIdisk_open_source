@@ -1,0 +1,498 @@
+# 📦 Документация Backend-части приложения PIdisk
+
+Данный бекенд представляет собой файловый менеджер с функциями синхронизации, построенный на Rust с использованием Tauri для интеграции с фронтендом и SSH2 для удаленного доступа к файлам.
+
+---
+
+## 🏛️ Архитектура и структура кода
+
+### Системные атрибуты и конфигурация
+
+```rust
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+```
+**Назначение:** Условная компиляция для Windows. В релизной сборке на Windows приложение запускается без консольного окна, что обеспечивает чистый GUI интерфейс без лишних окон.
+
+---
+
+## 📦 Импорты и зависимости
+
+### Синхронизация и многопоточность
+
+```rust
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::sync::mpsc;
+```
+- **once_cell::sync::Lazy** – ленивая инициализация глобальных переменных с гарантией thread-safety  
+- **std::sync::Mutex** – мьютекс для защиты критических секций  
+- **std::sync::Arc** – атомарный счётчик ссылок для безопасного разделения данных  
+- **tokio::sync::RwLock** – асинхронный read-write lock для эффективного доступа  
+- **tokio::sync::mpsc** – многопроизводительный однопотребительский канал  
+
+### Сериализация и десериализация
+
+```rust
+use serde::{Deserialize, Serialize};
+use serde_json;
+```
+- **serde** – фреймворк для сериализации/десериализации данных  
+- **serde_json** – JSON-специфичная реализация serde  
+
+### Сетевое взаимодействие и SSH
+
+```rust
+use ssh2::Session;
+use std::net::TcpStream;
+```
+- **ssh2::Session** – SSH-сессия для удалённого выполнения команд  
+- **std::net::TcpStream** – TCP-соединение для сетевого взаимодействия  
+
+### Файловая система и I/O
+
+```rust
+use std::io::Read;
+use std::fs::File;
+use std::io::{Write, BufWriter};
+use std::fs;
+use std::io::BufReader;
+use walkdir::WalkDir;
+use std::path::Path;
+```
+- **std::io::Read** – трейты для чтения данных  
+- **std::fs::File** – представление файла  
+- **std::io::{Write, BufWriter}** – запись с буферизацией  
+- **walkdir::WalkDir** – рекурсивный обход директорий  
+- **std::path::Path** – работа с путями  
+
+### Время и мониторинг
+
+```rust
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::time::Duration;
+use notify::{Watcher, RecursiveMode, RecommendedWatcher, Event};
+```
+- **SystemTime, UNIX_EPOCH** – системное время и временные метки  
+- **tokio::time::Duration** – асинхронные интервалы  
+- **notify** – библиотека для мониторинга изменений  
+
+### Tauri интеграция
+
+```rust
+use tauri::command;
+use std::collections::HashMap;
+```
+- **tauri::command** – макрос для создания команд, доступных из фронтенда  
+- **HashMap** – хеш-таблица  
+
+---
+
+## 🗄️ Структуры данных
+
+### Конфигурация приложения
+
+```rust
+#[derive(Serialize, Deserialize, Clone)]
+struct Settings {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    root_dir: String,
+    trash_dir: String,
+    sync_enabled: bool,
+    sync_interval_seconds: u64,
+    local_sync_dir: String,
+}
+```
+- **Назначение:** Основная конфигурация приложения с параметрами SSH и синхронизации.
+
+| Поле                  | Описание                                  |
+|-----------------------|-------------------------------------------|
+| `host`                | IP или домен SSH-сервера                  |
+| `port`                | Порт SSH (обычно 22)                      |
+| `username`, `password`| Учетные данные                            |
+| `root_dir`            | Корневая директория на сервере            |
+| `trash_dir`           | Путь к корзине для удаленных файлов       |
+| `sync_enabled`        | Флаг включения синхронизации              |
+| `sync_interval_seconds`| Интервал циклов синхронизации (секунды)  |
+| `local_sync_dir`      | Локальная папка синхронизации             |
+
+### Информация о синхронизируемой папке
+
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct SyncFolder {
+    name: String,
+    local_path: String,
+    remote_path: String,
+    enabled: bool,
+    last_sync: u64,
+}
+```
+- **Назначение:** Конфигурация одной папки синхронизации.
+
+### Метаданные файла
+
+```rust
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct FileInfo {
+    path: String,
+    modified: u64,
+    size: u64,
+    is_directory: bool,
+}
+```
+- **Назначение:** Метаданные файла для определения необходимости синхронизации.
+
+### Статус синхронизации
+
+```rust
+#[derive(Serialize, Deserialize, Clone)]
+struct SyncStatus {
+    is_running: bool,
+    last_sync_time: u64,
+    synced_folders: Vec<String>,
+    errors: Vec<String>,
+    files_synced: u32,
+    bytes_synced: u64,
+}
+```
+- **Назначение:** Текущий статус процесса синхронизации.
+
+---
+
+## 🔧 Глобальные переменные и состояние
+
+### Ленивая инициализация настроек
+
+```rust
+static SETTINGS: Lazy<Arc<RwLock<Settings>>> = Lazy::new(|| {
+    let path = "src-tauri/settings.json";
+    let settings = if Path::new(path).exists() {
+        load_settings_from_file(path)
+    } else {
+        let default = default_settings();
+        save_settings_to_file(path, &default);
+        default
+    };
+    Arc::new(RwLock::new(settings))
+});
+```
+- **Lazy** – инициализация при первом доступе  
+- **Arc<RwLock>** – безопасное разделение и читабельность
+
+### SSH-сессия
+
+```rust
+static SSH_SESSION: Lazy<Arc<Mutex<Option<Session>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+```
+- **Mutex<Option<Session>>** – глобальное хранилище SSH-сессии  
+
+### Текущая директория
+
+```rust
+static CURRENT_DIR: Lazy<Arc<RwLock<String>>> = Lazy::new(|| {
+    Arc::new(RwLock::new("/root/PIdisk".to_string()))
+});
+```
+- **Назначение:** Текущая рабочая директория на сервере  
+
+### Состояние синхронизации
+
+```rust
+static SYNC_FOLDERS: Lazy<Arc<RwLock<HashMap<String, SyncFolder>>>> = Lazy::new(|| {
+    Arc::new(RwLock::new(HashMap::new()))
+});
+static SYNC_STATUS: Lazy<Arc<RwLock<SyncStatus>>> = Lazy::new(|| {
+    Arc::new(RwLock::new(SyncStatus { /* ... */ }))
+});
+static SYNC_SHUTDOWN: Lazy<Arc<RwLock<bool>>> = Lazy::new(|| Arc::new(RwLock::new(false)));
+```
+- **SYNC_FOLDERS** – реестр папок  
+- **SYNC_STATUS** – статус  
+- **SYNC_SHUTDOWN** – флаг завершения
+
+---
+
+## 🛠️ Утилитарные функции
+
+### Загрузка настроек из файла
+
+```rust
+fn load_settings_from_file(path: &str) -> Settings { /* ... */ }
+```
+
+### Сохранение настроек в файл
+
+```rust
+fn save_settings_to_file(path: &str, settings: &Settings) { /* ... */ }
+```
+
+### Настройки по умолчанию
+
+```rust
+fn default_settings() -> Settings { /* ... */ }
+```
+- **Примечание:** Хардкодированные креды следует вынести в env-переменные.
+
+---
+
+## 🔐 SSH-подключение и сессии
+
+### Создание SSH-сессии
+
+```rust
+fn create_session(cfg: &Settings) -> Result<Session, String> { /* ... */ }
+```
+- Устанавливает TCP, SSH-handshake, аутентификацию.
+
+### Утилита для работы с сессией
+
+```rust
+async fn with_session<F, R>(f: F) -> Result<R, String> where F: FnOnce(&mut Session) -> Result<R, String> + Send + 'static { /* ... */ }
+```
+- Ленивое создание, reuse, spawn_blocking.
+
+---
+
+## ⚙️ Команды синхронизации
+
+### Добавление папки
+
+```rust
+#[command]
+async fn add_sync_folder(name: String, local_path: String, remote_path: String) -> Result<(), String> { /* ... */ }
+```
+
+### Получение списка папок
+
+```rust
+#[command]
+async fn get_sync_folders() -> Vec<SyncFolder> { /* ... */ }
+```
+
+### Включение/отключение и удаление
+
+```rust
+#[command]
+async fn toggle_sync_folder(name: String, enabled: bool) -> Result<(), String> { /* ... */ }
+#[command]
+async fn remove_sync_folder(name: String) -> Result<(), String> { /* ... */ }
+```
+
+---
+
+## 🔄 Основной цикл синхронизации
+
+### Запуск
+
+```rust
+#[command]
+async fn start_sync() -> Result<(), String> { /* ... */ }
+```
+
+### Цикл
+
+```rust
+async fn sync_loop(settings: Settings) { /* ... */ }
+```
+- Периодический цикл с таймером, accumulation stats, error handling.
+
+### Синхронизация одной папки
+
+```rust
+async fn sync_folder(folder: &SyncFolder) -> Result<(u32, u64), String> { /* ... */ }
+```
+
+---
+
+## 📡 Анализ файловой системы
+
+### Локальные файлы
+
+```rust
+async fn get_local_files(path: &str) -> Result<HashMap<String, FileInfo>, String> { /* ... */ }
+```
+
+### Удалённые файлы
+
+```rust
+async fn get_remote_files(remote_path: &str) -> Result<HashMap<String, FileInfo>, String> { /* ... */ }
+```
+
+---
+
+## 🔄 Алгоритмы синхронизации
+
+### Локальные → Удалённые
+
+```rust
+async fn sync_local_to_remote(folder: &SyncFolder) -> Result<(u32, u64), String> { /* ... */ }
+```
+- Last-write-wins, read lists, upload when needed.
+
+### Удалённые → Локальные
+
+```rust
+async fn sync_remote_to_local(folder: &SyncFolder) -> Result<(u32, u64), String> { /* ... */ }
+```
+- Download changes, mkdir, write buffered.
+
+---
+
+## 📂 Операции передачи файлов
+
+### Загрузка через SCP
+
+```rust
+async fn upload_file_to_remote(filename: &str, data: Vec<u8>, remote_dir: &str) -> Result<(), String> { /* ... */ }
+```
+
+### Скачивание через SFTP
+
+```rust
+async fn download_file_from_remote(filename: &str, remote_dir: &str, local_path: &Path) -> Result<(), String> { /* ... */ }
+```
+
+---
+
+## 🔔 Мониторинг файловой системы
+
+### Настройка наблюдателя
+
+```rust
+async fn setup_file_watcher() -> Result<(), String> { /* ... */ }
+```
+
+### Обработка событий
+
+```rust
+async fn watch_folder(folder: SyncFolder) -> Result<(), String> { /* ... */ }
+```
+
+---
+
+## 📑 Команды файлового менеджера
+
+### Настройки
+
+```rust
+#[command]
+async fn get_settings() -> Settings { /* ... */ }
+#[command]
+async fn update_settings(host: String, port: u16, username: String, password: String) -> Result<(), String> { /* ... */ }
+```
+
+### Чтение директории
+
+```rust
+#[command]
+async fn read_dir(dir: String) -> Result<(String, Vec<String>), String> { /* ... */ }
+```
+
+### Создание директории
+
+```rust
+#[command]
+async fn mkdir(name: String) -> Result<(), String> { /* ... */ }
+```
+
+### Перемещение/переименование
+
+```rust
+#[command]
+async fn mv(src: String, dest: String) -> Result<(), String> { /* ... */ }
+```
+
+### Удаление с корзиной
+
+```rust
+#[command]
+async fn rm(target: String) -> Result<(), String> { /* ... */ }
+```
+
+### Очистка корзины
+
+```rust
+#[command]
+async fn clear_all() -> Result<(), String> { /* ... */ }
+```
+
+### Информация о диске
+
+```rust
+#[command]
+async fn df() -> Result<String, String> { /* ... */ }
+```
+
+### Загрузка и скачивание файлов
+
+```rust
+#[command]
+async fn upload_file(filename: String, data: Vec<u8>) -> Result<(), String> { /* ... */ }
+#[command]
+async fn download_and_save(server_file_name: String, save_path: String) -> Result<(), String> { /* ... */ }
+```
+
+### Скачивание папки через scp
+
+```rust
+#[tauri::command]
+async fn download_folder(server_folder_name: String, save_path: String) -> Result<(), String> { /* ... */ }
+```
+
+### Переименование
+
+```rust
+#[command]
+async fn rename(old: String, new: String) -> Result<(), String> { /* ... */ }
+```
+
+---
+
+## 🚀 Точка входа приложения
+
+```rust
+#[tokio::main]
+async fn main() {
+    let path = "src-tauri/settings.json";
+    println!("Используемый settings.json: {}", path);
+    let file_content = std::fs::read_to_string(path).unwrap_or_else(|_| "Файл не найден".to_string());
+    println!("Содержимое settings.json:
+{}", file_content);
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            update_settings,
+            read_dir,
+            rename,
+            mkdir,
+            mv,
+            rm,
+            clear_all,
+            df,
+            upload_file,
+            download_and_save,
+            download_folder,
+            add_sync_folder,
+            get_sync_folders,
+            toggle_sync_folder,
+            remove_sync_folder,
+            get_sync_status,
+            start_sync,
+            stop_sync
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Tauri application");
+}
+```
+**Назначение:** Точка входа, настройка Tauri и регистрация всех команд.
+

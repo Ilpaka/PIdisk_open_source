@@ -1,0 +1,457 @@
+# Архитектура приложения
+
+## Технологический стек
+
+- **React 18** – основной фронтенд-фреймворк  
+- **Material-UI (MUI)** – библиотека компонентов для UI  
+- **Tauri** – фреймворк для создания десктопных приложений  
+- **Vite** – сборщик и dev-сервер  
+
+## Структура проекта
+
+```text
+src/
+├── App.jsx                 # Главный компонент приложения
+├── components/
+│   ├── FileGrid.jsx        # Компонент сетки файлов
+│   ├── FolderTree.jsx      # Компонент дерева папок
+│   ├── MemoryBar.jsx       # Компонент отображения использования диска
+│   └── SyncPanel.jsx       # Панель синхронизации
+└── vite.config.js          # Конфигурация Vite
+```
+
+---
+
+## Главный компонент (App.jsx)
+
+### Импорты и зависимости
+
+```javascript
+import React, { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+```
+
+- **useState** – для управления локальным состоянием компонента  
+- **useEffect** – для выполнения побочных эффектов  
+- **useRef** – для создания ссылок на DOM элементы  
+- **invoke** – функция для вызова Rust-команд из фронтенда  
+
+### Material-UI компоненты
+
+```javascript
+import {
+  Box, Menu, MenuItem, AppBar, Toolbar, IconButton, Typography,
+  Dialog, DialogTitle, DialogContent, DialogActions, TextField,
+  Button, Switch, FormControlLabel, List, ListItem, ListItemText,
+  ListItemSecondaryAction, Chip, Card, CardContent, LinearProgress, Grid
+} from "@mui/material";
+```
+
+Используемые компоненты:
+- Контейнеры: `Box`, `Card`, `CardContent`  
+- Меню: `Menu`, `MenuItem`, `List`, `ListItem`  
+- Панель: `AppBar`, `Toolbar`  
+- Формы: `TextField`, `Button`, `Switch`, `FormControlLabel`  
+- Диалоги: `Dialog`, `DialogTitle`, `DialogContent`, `DialogActions`  
+- Прогресс: `LinearProgress`  
+- Сетка: `Grid`  
+
+### Иконки
+
+```javascript
+import SettingsIcon from "@mui/icons-material/Settings";
+import AddIcon from "@mui/icons-material/Add";
+import ViewListIcon from "@mui/icons-material/ViewList";
+// ... другие иконки
+```
+
+### Tauri Dialog API
+
+```javascript
+const { save } = window.__TAURI__.dialog;
+const { open } = window.__TAURI__.dialog;
+```
+
+- `save()` – открывает диалог сохранения файла  
+- `open()` – открывает диалог выбора файлов/папок  
+
+---
+
+## Управление состоянием
+
+### Основные состояния файлового менеджера
+
+```javascript
+const [files, setFiles] = useState([]);              // Список файлов в текущей папке
+const [currentPath, setCurrentPath] = useState("."); // Текущий путь
+const [error, setError] = useState(null);            // Ошибки
+const [selectedFiles, setSelectedFiles] = useState([]); // Выбранные файлы
+```
+
+### Состояния интерфейса
+
+```javascript
+const [menu, setMenu] = useState(null);              
+const [viewMode, setViewMode] = useState("grid");    
+const [openSettings, setOpenSettings] = useState(false);
+```
+
+### Состояния синхронизации
+
+```javascript
+const [syncFolders, setSyncFolders] = useState([]);  
+const [syncStatus, setSyncStatus] = useState({
+  is_running: false,
+  last_sync_time: 0,
+  synced_folders: [],
+  errors: [],
+  files_synced: 0,
+  bytes_synced: 0
+});
+```
+
+---
+
+## Основные функции
+
+### Загрузка данных
+
+```javascript
+async function loadDirectory(dir) {
+  try {
+    const [newPath, list] = await invoke("read_dir", { dir });
+    setCurrentPath(newPath);
+    setFiles(list || []);
+    setSelectedFiles([]);
+    setError(null);
+  } catch (e) {
+    setError(String(e));
+    setFiles([]);
+  }
+}
+```
+
+- **Назначение:** загрузка содержимого директории через Rust-бэкенд  
+- **Параметры:**  
+  - `dir` – путь к директории  
+- **Возвращает:** обновляет состояние компонента  
+
+### Управление файлами
+
+```javascript
+const handleDelete = async (name) => {
+  handleClose();
+  try {
+    await invoke("rm", { target: name });
+    loadDirectory(currentPath);
+    setDeletedItem({ parentPath: currentPath, name });
+    showSnackbar('Файл(-ы) удалён(-ы)!', 'success');
+  } catch (e) {
+    showSnackbar('Ошибка при удаление!', 'error');
+  }
+};
+```
+
+- **Назначение:** удаляет файл или папку  
+
+### Загрузка файлов
+
+```javascript
+const handleUploadClick = async () => {
+  const inp = document.createElement("input");
+  inp.type = "file";
+  inp.multiple = true;
+  inp.onchange = async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const buf = await file.arrayBuffer();
+        const bytes = Array.from(new Uint8Array(buf));
+        await invoke("upload_file", {
+          filename: file.name,
+          data: bytes,
+        });
+      }
+      showSnackbar('Загрузка завершена!', 'success');
+      await loadDirectory(currentPath);
+    } catch (err) {
+      showSnackbar('Ошибка при загрузке!', 'error');
+    }
+  };
+  inp.click();
+};
+```
+
+- **Назначение:** загрузка файлов через HTML5 File API  
+
+### Синхронизация
+
+```javascript
+async function handleStartSync() {
+  try {
+    await invoke("start_sync");
+    loadSyncStatus();
+    showSnackbar('Синхронизация запущена!', 'success');
+  } catch (e) {
+    showSnackbar(`Ошибка запуска синхронизации: ${e}`, 'error');
+  }
+}
+```
+
+- **Назначение:** запуск процесса синхронизации  
+
+---
+
+## Компонент FileGrid
+
+### Свойства
+
+- `items` – массив файлов/папок  
+- `onDoubleClick` – обработчик двойного клика  
+- `onContextMenu` – обработчик контекстного меню  
+- `renameTarget` – файл в режиме переименования  
+- `renameValue` – значение для переименования  
+- `viewMode` – режим отображения (`grid` или `list`)  
+- `selectedFiles` – выбранные файлы  
+- `setSelectedFiles` – функция выбора файлов  
+
+### Иконки файлов
+
+```javascript
+const extToIcon = {
+  pdf: <PictureAsPdfIcon sx={{ fontSize: ICON_SIZE }} />,
+  txt: <DescriptionIcon sx={{ fontSize: ICON_SIZE }} />,
+  jpg: <ImageIcon sx={{ fontSize: ICON_SIZE }} />,
+  mp4: <VideocamIcon sx={{ fontSize: ICON_SIZE }} />,
+  default: <DescriptionIcon sx={{ fontSize: ICON_SIZE }} />
+};
+
+function getFileIcon(name) {
+  if (!/\.[^/.]+$/.test(name)) {
+    return <FolderIcon sx={{ fontSize: ICON_SIZE }} />;
+  }
+  const ext = name.split(".").pop().toLowerCase();
+  return extToIcon[ext] || extToIcon.default;
+}
+```
+
+### Выбор файлов
+
+```javascript
+const handleSelect = (e, name) => {
+  e.preventDefault();
+
+  if (e.shiftKey && selectedFiles.length) {
+    const sorted = [...items];
+    const last = sorted.indexOf(selectedFiles[selectedFiles.length - 1]);
+    const curr = sorted.indexOf(name);
+    const [from, to] = last < curr ? [last, curr] : [curr, last];
+    const range = sorted.slice(from, to + 1);
+    setSelectedFiles(Array.from(new Set([...selectedFiles, ...range])));
+  } else if (e.ctrlKey || e.metaKey) {
+    if (selectedFiles.includes(name)) {
+      setSelectedFiles(selectedFiles.filter(f => f !== name));
+    } else {
+      setSelectedFiles([...selectedFiles, name]);
+    }
+  } else {
+    setSelectedFiles([name]);
+  }
+};
+```
+
+---
+
+## Компонент FolderTree
+
+### Структура узла
+
+```javascript
+const [tree, setTree] = useState([
+  { 
+    name: "PIdisk", 
+    path: ROOT, 
+    children: null, 
+    open: false, 
+    isFolder: true 
+  }
+]);
+```
+
+- `name` – отображаемое имя  
+- `path` – полный путь  
+- `children` – дочерние элементы (null, если не загружены)  
+- `open` – состояние раскрытия  
+- `isFolder` – флаг папки  
+
+### Автоматическое раскрытие
+
+```javascript
+function updateOpenState(nodes, currentPath) {
+  return nodes.map((node) => {
+    const isOnPath = currentPath.startsWith(node.path);
+    let children = node.children;
+    if (children) {
+      children = updateOpenState(children, currentPath);
+    }
+    return {
+      ...node,
+      open: isOnPath,
+      children,
+    };
+  });
+}
+```
+
+### Ленивая загрузка
+
+```javascript
+const toggle = async (node) => {
+  if (!node.isFolder) return;
+
+  if (node.children === null) {
+    const [, list] = await invoke("read_dir", { dir: node.path });
+    node.children = list.map((n) => ({
+      name: n,
+      path: `${node.path}/${n}`,
+      children: null,
+      open: false,
+      isFolder: !/\.[^/.]+$/.test(n),
+    }));
+  }
+
+  node.open = !node.open;
+  setTree([...tree]);
+};
+```
+
+---
+
+## Компонент MemoryBar
+
+```javascript
+export default function MemoryBar() {
+  const [usage, setUsage] = useState({ used: "0", total: "0", percent: 0 });
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function fetch() {
+      const out = await invoke("df");
+      const lines = out.trim().split("\n");
+      if (lines.length < 2) return;
+      const parts = lines[1].split(/\s+/);
+      const total = parts[1], used = parts[2];
+      const percent = parseInt(parts[4].replace("%", ""), 10);
+      if (mounted) setUsage({ used, total, percent });
+    }
+
+    fetch();
+    const iv = setInterval(fetch, 10000);
+
+    return () => {
+      mounted = false;
+      clearInterval(iv);
+    };
+  }, []);
+
+  return (
+    <Box sx={{ p: 1 }}>
+      <Typography variant="caption">
+        Диск: {usage.used} из {usage.total} ({usage.percent}%)
+      </Typography>
+      <LinearProgress 
+        variant="determinate" 
+        value={usage.percent} 
+        sx={{ height: 6; borderRadius: 3 }} 
+      />
+    </Box>
+  );
+}
+```
+
+---
+
+## Компонент SyncPanel
+
+```javascript
+export default function SyncPanel({
+  syncStatus,
+  syncFolders,
+  onAddFolder,
+  onStartSync,
+  onStopSync,
+  onToggleFolder,
+  onRemoveFolder,
+})
+```
+
+- `syncStatus` – статус синхронизации  
+- `syncFolders` – список синхронизируемых папок  
+- Хендлеры для добавления, запуска, остановки и удаления  
+
+### Форматирование размера
+
+```javascript
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+```
+
+---
+
+## Конфигурация Vite
+
+```javascript
+export default defineConfig({
+  plugins: [react()],
+  optimizeDeps: {
+    include: [
+      "@tauri-apps/api/dialog",
+      "@tauri-apps/api/core",
+      "@tauri-apps/api/tauri",
+    ],
+    exclude: ["some-large-lib"],
+  },
+  server: { watch: { ignored: ["!**/node_modules/**"] } },
+  css: {
+    postcss: {
+      plugins: [postcssPlugin(), autoprefixer()],
+    },
+  },
+});
+```
+
+---
+
+## Паттерны и архитектурные решения
+
+- **Управление состоянием**  
+  - React hooks для локального состояния  
+  - Централизованное управление ошибками через `error` state  
+  - Паттерн "поднятие состояния" для общих данных  
+
+- **Асинхронные операции**  
+  - Взаимодействие с бэкендом через `invoke()`  
+  - Обработка ошибок через `try-catch`  
+  - Уведомления через snackbar  
+
+- **Оптимизация**  
+  - Ленивая загрузка дерева папок  
+  - Мемоизация компонентов (`React.memo`)  
+  - Дебаунсинг операций переименования  
+
+- **UX**  
+  - Контекстные меню для действий  
+  - Горячие клавиши (Ctrl+A, Delete, F2)  
+  - Drag & Drop для перемещения  
+  - Множественный выбор файлов  
+
+
