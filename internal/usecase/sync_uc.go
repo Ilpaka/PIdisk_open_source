@@ -172,7 +172,31 @@ func (uc *SyncUseCase) Status() domain.SyncStats {
 	engine := uc.engine
 	uc.mu.Unlock()
 	if engine == nil {
-		return domain.SyncStats{}
+		return emptyStats()
 	}
-	return engine.Stats()
+	return normaliseStats(engine.Stats())
+}
+
+// emptyStats returns a zero-value SyncStats with non-nil slices so the
+// JSON payload always carries [] rather than null. The frontend reads
+// .length on each slice and a null crashes the render path.
+func emptyStats() domain.SyncStats {
+	return domain.SyncStats{
+		SyncedFolders: []string{},
+		Errors:        []string{},
+		Conflicts:     []domain.SyncConflict{},
+	}
+}
+
+func normaliseStats(s domain.SyncStats) domain.SyncStats {
+	if s.SyncedFolders == nil {
+		s.SyncedFolders = []string{}
+	}
+	if s.Errors == nil {
+		s.Errors = []string{}
+	}
+	if s.Conflicts == nil {
+		s.Conflicts = []domain.SyncConflict{}
+	}
+	return s
 }

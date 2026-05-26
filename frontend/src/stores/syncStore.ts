@@ -12,6 +12,22 @@ const emptyStats: SyncStats = {
   conflicts: [],
 };
 
+// normaliseStats guarantees that array fields are never null, even if a
+// quirky JSON payload from the backend leaves them out. The render path
+// reads .length on each of them and would otherwise crash.
+function normaliseStats(input: SyncStats | null | undefined): SyncStats {
+  const s = input ?? emptyStats;
+  return {
+    isRunning: Boolean(s.isRunning),
+    lastSyncTime: s.lastSyncTime ?? "",
+    syncedFolders: s.syncedFolders ?? [],
+    errors: s.errors ?? [],
+    filesSynced: s.filesSynced ?? 0,
+    bytesSynced: s.bytesSynced ?? 0,
+    conflicts: s.conflicts ?? [],
+  };
+}
+
 interface SyncState {
   folders: SyncFolder[];
   stats: SyncStats;
@@ -35,13 +51,13 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     set({ loading: true });
     try {
       const folders = await syncApi.list();
-      set({ folders, loading: false });
+      set({ folders: folders ?? [], loading: false });
     } catch {
       set({ loading: false });
     }
   },
 
-  setStats: (stats) => set({ stats }),
+  setStats: (stats) => set({ stats: normaliseStats(stats) }),
 
   async add(folder) {
     await syncApi.add(folder);
@@ -70,6 +86,6 @@ export const useSyncStore = create<SyncState>((set, get) => ({
 
   async refreshStatus() {
     const stats = await syncApi.status();
-    set({ stats });
+    set({ stats: normaliseStats(stats) });
   },
 }));
