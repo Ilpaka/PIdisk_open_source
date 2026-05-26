@@ -29,6 +29,11 @@ func (b *TransferBindings) DownloadFolder(remoteRoot, localRoot string) (string,
 	return string(id), err
 }
 
+func (b *TransferBindings) DownloadFolderAsZip(remoteRoot, localZip string) (string, error) {
+	id, err := b.uc.DownloadFolderAsZip(b.app.Ctx(), remoteRoot, localZip)
+	return string(id), err
+}
+
 func (b *TransferBindings) CancelTransfer(id string) error {
 	return b.uc.Cancel(domain.TransferID(id))
 }

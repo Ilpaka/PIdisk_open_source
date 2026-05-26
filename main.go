@@ -112,6 +112,7 @@ func main() {
 	trashBindings := wailsdelivery.NewTrashBindings(app, trashUC)
 	syncBindings := wailsdelivery.NewSyncBindings(app, syncUC)
 	settingsBindings := wailsdelivery.NewSettingsBindings(app, settingsUC)
+	dialogBindings := wailsdelivery.NewDialogBindings(app)
 
 	err = wailsapp.Run(&options.App{
 		Title:                    "PIdisk",
@@ -133,6 +134,7 @@ func main() {
 			trashBindings,
 			syncBindings,
 			settingsBindings,
+			dialogBindings,
 		},
 	})
 	if err != nil {

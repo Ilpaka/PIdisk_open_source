@@ -32,6 +32,7 @@ import { useTransferStore } from "@/stores/transferStore";
 import { connectionApi } from "@/api/connection";
 import { filesApi } from "@/api/files";
 import { transferApi } from "@/api/transfer";
+import { dialogsApi } from "@/api/dialogs";
 import { confirmDialog, promptDialog } from "@/stores/dialogStore";
 import BreadcrumbsBar from "@/components/BreadcrumbsBar";
 import FileGrid from "@/components/FileGrid";
@@ -40,6 +41,10 @@ import TransferDrawer from "@/components/TransferDrawer";
 import SyncPanel from "@/components/SyncPanel";
 import TrashPanel from "@/components/TrashPanel";
 import ResizableSidebar from "@/components/ResizableSidebar";
+import FileContextMenu, {
+  type FileContextMenuAnchor,
+} from "@/components/FileContextMenu";
+import type { FileEntry } from "@/types/domain";
 
 export default function FilesPage() {
   const navigate = useNavigate();
@@ -52,6 +57,7 @@ export default function FilesPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  const [ctxAnchor, setCtxAnchor] = useState<FileContextMenuAnchor | null>(null);
 
   const {
     cwd,
@@ -81,8 +87,8 @@ export default function FilesPage() {
     if (error) pushSnack("error", error);
   }, [error, pushSnack]);
 
-  const onActivate = (path: string, isDir: boolean) => {
-    if (isDir) void setCwd(path);
+  const onActivate = (p: string, isDir: boolean) => {
+    if (isDir) void setCwd(p);
   };
 
   const onMkdir = async () => {
@@ -98,6 +104,80 @@ export default function FilesPage() {
       await refresh();
     } catch (err) {
       pushSnack("error", String(err));
+    }
+  };
+
+  // Upload uses the native file picker so the user never types a path.
+  const onUpload = async () => {
+    let localPath: string;
+    try {
+      localPath = await dialogsApi.selectFile("Choose a file to upload");
+    } catch (err) {
+      pushSnack("error", String(err));
+      return;
+    }
+    if (!localPath) return;
+    const remoteName = localPath.split(/[/\\]/).pop() ?? "uploaded";
+    try {
+      await transferApi.upload(localPath, `${cwd}/${remoteName}`);
+      setDrawerOpen(true);
+    } catch (err) {
+      pushSnack("error", String(err));
+    }
+  };
+
+  // Download is "smart": a single file uses save-as, a single folder offers
+  // a zip archive, multi-select falls back to a save-folder dialog.
+  const startFileDownload = async (entry: FileEntry) => {
+    let dest: string;
+    try {
+      dest = await dialogsApi.saveFile(entry.name, "Save file as");
+    } catch (err) {
+      pushSnack("error", String(err));
+      return;
+    }
+    if (!dest) return;
+    try {
+      await transferApi.download(entry.path, dest);
+      setDrawerOpen(true);
+    } catch (err) {
+      pushSnack("error", String(err));
+    }
+  };
+
+  const startFolderZipDownload = async (entry: FileEntry) => {
+    let dest: string;
+    try {
+      dest = await dialogsApi.saveArchive(entry.name);
+    } catch (err) {
+      pushSnack("error", String(err));
+      return;
+    }
+    if (!dest) return;
+    try {
+      await transferApi.downloadFolderAsZip(entry.path, dest);
+      setDrawerOpen(true);
+    } catch (err) {
+      pushSnack("error", String(err));
+    }
+  };
+
+  const onDownloadFromToolbar = async () => {
+    if (selection.size === 0) {
+      pushSnack("warning", "Select a file or folder to download");
+      return;
+    }
+    if (selection.size > 1) {
+      pushSnack("warning", "Multi-download is not implemented yet, select one item");
+      return;
+    }
+    const targetPath = Array.from(selection)[0];
+    const entry = entries.find((e) => e.path === targetPath);
+    if (!entry) return;
+    if (entry.isDir) {
+      await startFolderZipDownload(entry);
+    } else {
+      await startFileDownload(entry);
     }
   };
 
@@ -124,62 +204,47 @@ export default function FilesPage() {
     }
   };
 
-  const onUpload = async () => {
-    const localPath = await promptDialog({
-      title: "Upload file",
-      label: "Local file path",
-      placeholder: "/Users/you/Downloads/file.zip",
+  const removeEntry = async (entry: FileEntry) => {
+    const ok = await confirmDialog({
+      title: "Move to trash",
+      message: `Move "${entry.name}" to the trash directory?`,
+      confirmText: "Move",
+      destructive: true,
     });
-    if (!localPath) return;
-    const remoteName = localPath.split(/[/\\]/).pop() ?? "uploaded";
+    if (!ok) return;
     try {
-      await transferApi.upload(localPath, `${cwd}/${remoteName}`);
-      setDrawerOpen(true);
+      await filesApi.remove(entry.path);
+      pushSnack("info", `Moved to trash: ${entry.path}`);
+      await refresh();
     } catch (err) {
       pushSnack("error", String(err));
     }
   };
 
-  const onDownload = async () => {
-    if (selection.size !== 1) {
-      pushSnack("warning", "Select exactly one file to download");
-      return;
-    }
-    const target = Array.from(selection)[0];
-    const dest = await promptDialog({
-      title: "Download file",
-      label: "Local destination path",
-      defaultValue: target.split("/").pop() ?? "",
-    });
-    if (!dest) return;
-    try {
-      await transferApi.download(target, dest);
-      setDrawerOpen(true);
-    } catch (err) {
-      pushSnack("error", String(err));
-    }
-  };
-
-  const onRename = async () => {
-    if (selection.size !== 1) {
-      pushSnack("warning", "Select a single entry to rename");
-      return;
-    }
-    const target = Array.from(selection)[0];
-    const oldName = target.split("/").pop() ?? "";
+  const renameEntry = async (entry: FileEntry) => {
     const next = await promptDialog({
       title: "Rename",
       label: "New name",
-      defaultValue: oldName,
+      defaultValue: entry.name,
     });
-    if (!next || next === oldName) return;
+    if (!next || next === entry.name) return;
     try {
-      await filesApi.rename(cwd, oldName, next);
+      await filesApi.rename(cwd, entry.name, next);
       pushSnack("success", `Renamed to "${next}"`);
       await refresh();
     } catch (err) {
       pushSnack("error", String(err));
     }
+  };
+
+  const onRenameSelected = async () => {
+    if (selection.size !== 1) {
+      pushSnack("warning", "Select a single entry to rename");
+      return;
+    }
+    const target = Array.from(selection)[0];
+    const entry = entries.find((e) => e.path === target);
+    if (entry) await renameEntry(entry);
   };
 
   const onBack = () => {
@@ -189,7 +254,7 @@ export default function FilesPage() {
   };
 
   useHotkeys({
-    onRename,
+    onRename: onRenameSelected,
     onDelete: onRemoveSelected,
     onSelectAll: selectAll,
     onEscape: clearSelection,
@@ -228,9 +293,13 @@ export default function FilesPage() {
               <CloudUploadIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Download selected">
+          <Tooltip title="Download selected (folder downloads as ZIP)">
             <span>
-              <IconButton size="small" onClick={onDownload} disabled={selection.size === 0}>
+              <IconButton
+                size="small"
+                onClick={onDownloadFromToolbar}
+                disabled={selection.size === 0}
+              >
                 <CloudDownloadIcon fontSize="small" />
               </IconButton>
             </span>
@@ -296,6 +365,10 @@ export default function FilesPage() {
             loading={loading}
             onActivate={(e) => onActivate(e.path, e.isDir)}
             onSelect={(e, modifier) => (modifier ? toggleSelect(e.path) : selectOnly(e.path))}
+            onContextMenu={(entry, ev) => {
+              selectOnly(entry.path);
+              setCtxAnchor({ entry, mouseX: ev.clientX, mouseY: ev.clientY });
+            }}
           />
         </Box>
       </Stack>
@@ -308,6 +381,14 @@ export default function FilesPage() {
       <Drawer anchor="right" open={trashOpen} onClose={() => setTrashOpen(false)}>
         <TrashPanel onChanged={() => refresh()} />
       </Drawer>
+      <FileContextMenu
+        anchor={ctxAnchor}
+        onClose={() => setCtxAnchor(null)}
+        onDownload={startFileDownload}
+        onDownloadZip={startFolderZipDownload}
+        onRename={renameEntry}
+        onDelete={removeEntry}
+      />
     </Stack>
   );
 }
